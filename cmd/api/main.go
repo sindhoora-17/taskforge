@@ -1,32 +1,64 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 	"github.com/sindhoora-17/taskforge/internal/job"
+	"github.com/sindhoora-17/taskforge/internal/repository"
 )
 
-type jobStore struct {
-	mu   sync.RWMutex
-	jobs map[string]job.Job
+type jobRepository interface {
+	Create(ctx context.Context, newJob job.Job) error
+	GetByID(ctx context.Context, jobID string) (job.Job, error)
+}
+
+type api struct {
+	jobs jobRepository
 }
 
 func main() {
-	store := &jobStore{
-		jobs: make(map[string]job.Job),
+	if err := godotenv.Load(); err != nil {
+		log.Println(".env file not found; using system environment variables")
+	}
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		log.Fatalf("failed to create database pool: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("failed to connect to PostgreSQL: %v", err)
+	}
+
+	log.Println("Connected to PostgreSQL")
+
+	handler := &api{
+		jobs: repository.NewPostgresJobRepository(pool),
 	}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", healthHandler)
-	mux.HandleFunc("POST /jobs", store.createJobHandler)
-	mux.HandleFunc("GET /jobs/{id}", store.getJobHandler)
+	mux.HandleFunc("POST /jobs", handler.createJobHandler)
+	mux.HandleFunc("GET /jobs/{id}", handler.getJobHandler)
 
 	server := &http.Server{
 		Addr:              ":8080",
@@ -48,7 +80,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *jobStore) createJobHandler(w http.ResponseWriter, r *http.Request) {
+func (a *api) createJobHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -105,23 +137,42 @@ func (s *jobStore) createJobHandler(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   now,
 	}
 
-	s.mu.Lock()
-	s.jobs[newJob.ID] = newJob
-	s.mu.Unlock()
+	if err := a.jobs.Create(r.Context(), newJob); err != nil {
+		log.Printf("failed to store job: %v", err)
+
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to create job",
+		})
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, newJob)
 }
 
-func (s *jobStore) getJobHandler(w http.ResponseWriter, r *http.Request) {
+func (a *api) getJobHandler(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 
-	s.mu.RLock()
-	storedJob, exists := s.jobs[jobID]
-	s.mu.RUnlock()
+	if _, err := uuid.Parse(jobID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid job id",
+		})
+		return
+	}
 
-	if !exists {
+	storedJob, err := a.jobs.GetByID(r.Context(), jobID)
+
+	if errors.Is(err, repository.ErrJobNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error": "job not found",
+		})
+		return
+	}
+
+	if err != nil {
+		log.Printf("failed to retrieve job: %v", err)
+
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve job",
 		})
 		return
 	}

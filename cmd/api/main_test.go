@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,32 @@ import (
 	"github.com/sindhoora-17/taskforge/internal/job"
 )
 
+type fakeJobRepository struct {
+	jobs map[string]job.Job
+}
+
+func (f *fakeJobRepository) Create(
+	_ context.Context,
+	newJob job.Job,
+) error {
+	f.jobs[newJob.ID] = newJob
+	return nil
+}
+
+func (f *fakeJobRepository) GetByID(
+	_ context.Context,
+	jobID string,
+) (job.Job, error) {
+	return f.jobs[jobID], nil
+}
+
 func TestCreateJobHandler(t *testing.T) {
-	store := &jobStore{
+	repository := &fakeJobRepository{
 		jobs: make(map[string]job.Job),
+	}
+
+	handler := &api{
+		jobs: repository,
 	}
 
 	body := strings.NewReader(`{
@@ -25,7 +49,7 @@ func TestCreateJobHandler(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/jobs", body)
 	response := httptest.NewRecorder()
 
-	store.createJobHandler(response, request)
+	handler.createJobHandler(response, request)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf(
@@ -67,14 +91,18 @@ func TestCreateJobHandler(t *testing.T) {
 		)
 	}
 
-	if _, exists := store.jobs[createdJob.ID]; !exists {
+	if _, exists := repository.jobs[createdJob.ID]; !exists {
 		t.Error("expected created job to be stored")
 	}
 }
 
 func TestCreateJobHandlerRejectsMissingType(t *testing.T) {
-	store := &jobStore{
+	repository := &fakeJobRepository{
 		jobs: make(map[string]job.Job),
+	}
+
+	handler := &api{
+		jobs: repository,
 	}
 
 	body := strings.NewReader(`{
@@ -86,7 +114,7 @@ func TestCreateJobHandlerRejectsMissingType(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/jobs", body)
 	response := httptest.NewRecorder()
 
-	store.createJobHandler(response, request)
+	handler.createJobHandler(response, request)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf(
@@ -96,7 +124,7 @@ func TestCreateJobHandlerRejectsMissingType(t *testing.T) {
 		)
 	}
 
-	if len(store.jobs) != 0 {
+	if len(repository.jobs) != 0 {
 		t.Error("invalid job should not be stored")
 	}
 }

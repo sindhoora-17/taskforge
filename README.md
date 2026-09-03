@@ -7,9 +7,12 @@ TaskForge is a distributed job execution platform written in Go. It accepts back
 - Health-check endpoint
 - Job submission with request validation
 - Unique job identifiers
-- In-memory job storage
+- PostgreSQL job persistence
 - Job status retrieval
+- PostgreSQL connection pooling with pgx
+- Versioned SQL migrations
 - Automated HTTP handler tests
+- Docker Compose development environment
 
 ## API Endpoints
 
