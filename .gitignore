@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+
+# Build output
+bin/
+taskforge
+
+# Test output
+coverage.out
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
