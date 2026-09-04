@@ -1,0 +1,8 @@
+.git
+.gitignore
+.env
+output
+bin
+coverage.out
+*.log
+.DS_Store

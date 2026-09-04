@@ -2,7 +2,7 @@
 
 TaskForge is an in-progress distributed job execution platform written in Go. The API accepts background jobs, stores their state in PostgreSQL, and publishes them to Redis Streams for asynchronous processing.
 
-> **Project status:** An end-to-end single-worker flow is operational. Concurrent workers, retries, and crash recovery are currently under development.
+> **Project status:** End-to-end distributed job execution is operational. Automatic retries, crash recovery, and production observability are currently under development.
 
 ## Current Features
 
@@ -23,27 +23,20 @@ TaskForge is an in-progress distributed job execution platform written in Go. Th
 - Job lifecycle updates (`queued`, `running`, `completed`, and `failed`)
 - Redis message acknowledgements
 - JSON report generation
+- Configurable concurrent worker pools
+- Horizontal worker scaling with Docker Compose
+- Redis consumer-group distribution across worker instances
+- Multi-stage Docker application builds
+- Executor and worker-processing unit tests
 
 ## Current Flow
 
 ```text
-Client
-  |
-  v
-Go API
-  |
-  +----> PostgreSQL (queued)
-  |
-  +----> Redis Stream
-              |
-              v
-          Go Worker
-              |
-              +----> Execute job
-              |
-              +----> PostgreSQL (completed or failed)
-              |
-              +----> Acknowledge Redis message
+                         ┌──> Worker Process 1 ──> Executors
+Client ──> API ──> Redis ┤
+                         └──> Worker Process 2 ──> Executors
+              │                       │
+              └──────> PostgreSQL <───┘
 ```
 
 ## API Endpoints
@@ -164,8 +157,6 @@ go test -v ./...
 
 ## Planned Features
 
-- Concurrent worker pools
-- Multiple distributed worker instances
 - Automatic retries with exponential backoff
 - Worker crash recovery
 - Scheduled and priority jobs
