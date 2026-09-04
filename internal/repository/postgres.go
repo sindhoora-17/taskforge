@@ -99,3 +99,35 @@ func (r *PostgresJobRepository) GetByID(
 
 	return storedJob, nil
 }
+func (r *PostgresJobRepository) UpdateStatus(
+	ctx context.Context,
+	jobID string,
+	status job.Status,
+	attempts int,
+) error {
+	query := `
+		UPDATE jobs
+		SET
+			status = $2,
+			attempts = $3,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+
+	result, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		string(status),
+		attempts,
+	)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrJobNotFound
+	}
+
+	return nil
+}
