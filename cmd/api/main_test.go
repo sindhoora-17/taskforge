@@ -15,6 +15,18 @@ type fakeJobRepository struct {
 	jobs map[string]job.Job
 }
 
+type fakeJobQueue struct {
+	jobs []job.Job
+}
+
+func (f *fakeJobQueue) Enqueue(
+	_ context.Context,
+	newJob job.Job,
+) (string, error) {
+	f.jobs = append(f.jobs, newJob)
+	return "1-0", nil
+}
+
 func (f *fakeJobRepository) Create(
 	_ context.Context,
 	newJob job.Job,
@@ -35,8 +47,11 @@ func TestCreateJobHandler(t *testing.T) {
 		jobs: make(map[string]job.Job),
 	}
 
+	queue := &fakeJobQueue{}
+
 	handler := &api{
-		jobs: repository,
+		jobs:  repository,
+		queue: queue,
 	}
 
 	body := strings.NewReader(`{
@@ -93,6 +108,14 @@ func TestCreateJobHandler(t *testing.T) {
 
 	if _, exists := repository.jobs[createdJob.ID]; !exists {
 		t.Error("expected created job to be stored")
+	}
+
+	if len(queue.jobs) != 1 {
+		t.Fatalf("expected one queued job, got %d", len(queue.jobs))
+	}
+
+	if queue.jobs[0].ID != createdJob.ID {
+		t.Error("expected stored and queued jobs to have the same ID")
 	}
 }
 
