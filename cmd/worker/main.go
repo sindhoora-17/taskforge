@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -97,13 +99,29 @@ func main() {
 		workerConcurrency,
 	)
 
+	retryScheduler := worker.NewRetryScheduler(
+		redisQueue,
+		250*time.Millisecond,
+		100,
+	)
+
 	log.Printf(
 		"Worker process %s started with concurrency %d",
 		consumerName,
 		workerConcurrency,
 	)
 
+	var waitGroup sync.WaitGroup
+
+	waitGroup.Add(1)
+
+	go func() {
+		defer waitGroup.Done()
+		retryScheduler.Run(ctx)
+	}()
+
 	workerPool.Run(ctx)
+	waitGroup.Wait()
 
 	log.Printf("Worker process %s stopped", consumerName)
 }

@@ -4,23 +4,51 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sindhoora-17/taskforge/internal/job"
 	"github.com/sindhoora-17/taskforge/internal/queue"
 )
 
+const (
+	baseRetryDelay = time.Second
+	maxRetryDelay  = time.Minute
+)
+
 type Repository interface {
 	GetByID(ctx context.Context, jobID string) (job.Job, error)
+
 	UpdateStatus(
 		ctx context.Context,
 		jobID string,
 		status job.Status,
 		attempts int,
 	) error
+
+	MarkRetrying(
+		ctx context.Context,
+		jobID string,
+		attempts int,
+		lastError string,
+		nextAttemptAt time.Time,
+	) error
+
+	MarkFailed(
+		ctx context.Context,
+		jobID string,
+		attempts int,
+		lastError string,
+	) error
 }
 
 type MessageQueue interface {
 	Acknowledge(ctx context.Context, messageID string) error
+
+	ScheduleRetry(
+		ctx context.Context,
+		message queue.Message,
+		nextAttemptAt time.Time,
+	) error
 }
 
 type Executor interface {
@@ -29,6 +57,7 @@ type Executor interface {
 		jobID string,
 		jobType string,
 		payload json.RawMessage,
+		attempt int,
 	) error
 }
 
@@ -36,6 +65,7 @@ type Processor struct {
 	repository Repository
 	queue      MessageQueue
 	executor   Executor
+	now        func() time.Time
 }
 
 func NewProcessor(
@@ -47,6 +77,7 @@ func NewProcessor(
 		repository: repository,
 		queue:      queue,
 		executor:   executor,
+		now:        time.Now,
 	}
 }
 
@@ -59,8 +90,6 @@ func (p *Processor) Process(
 		return fmt.Errorf("retrieve job: %w", err)
 	}
 
-	// A message may be delivered more than once. If the job already
-	// completed, acknowledge it without executing it again.
 	if storedJob.Status == job.StatusCompleted {
 		if err := p.queue.Acknowledge(ctx, message.ID); err != nil {
 			return fmt.Errorf("acknowledge completed job: %w", err)
@@ -85,17 +114,56 @@ func (p *Processor) Process(
 		storedJob.ID,
 		storedJob.Type,
 		storedJob.Payload,
+		attempts,
 	)
 
 	if executionErr != nil {
-		if err := p.repository.UpdateStatus(
+		if attempts < storedJob.MaxAttempts {
+			nextAttemptAt := p.now().
+				UTC().
+				Add(calculateRetryDelay(attempts))
+
+			if err := p.repository.MarkRetrying(
+				ctx,
+				storedJob.ID,
+				attempts,
+				executionErr.Error(),
+				nextAttemptAt,
+			); err != nil {
+				return fmt.Errorf(
+					"execution failed (%v) and retry state update failed: %w",
+					executionErr,
+					err,
+				)
+			}
+
+			if err := p.queue.ScheduleRetry(
+				ctx,
+				message,
+				nextAttemptAt,
+			); err != nil {
+				return fmt.Errorf(
+					"execution failed (%v) and retry scheduling failed: %w",
+					executionErr,
+					err,
+				)
+			}
+
+			return fmt.Errorf(
+				"execute job: %w; retry scheduled for %s",
+				executionErr,
+				nextAttemptAt.Format(time.RFC3339Nano),
+			)
+		}
+
+		if err := p.repository.MarkFailed(
 			ctx,
 			storedJob.ID,
-			job.StatusFailed,
 			attempts,
+			executionErr.Error(),
 		); err != nil {
 			return fmt.Errorf(
-				"execution failed (%v) and status update failed: %w",
+				"execution failed (%v) and final status update failed: %w",
 				executionErr,
 				err,
 			)
@@ -109,7 +177,11 @@ func (p *Processor) Process(
 			)
 		}
 
-		return fmt.Errorf("execute job: %w", executionErr)
+		return fmt.Errorf(
+			"execute job after %d attempts: %w",
+			attempts,
+			executionErr,
+		)
 	}
 
 	if err := p.repository.UpdateStatus(
@@ -126,4 +198,18 @@ func (p *Processor) Process(
 	}
 
 	return nil
+}
+
+func calculateRetryDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	delay := baseRetryDelay * time.Duration(1<<(attempts-1))
+
+	if delay > maxRetryDelay {
+		return maxRetryDelay
+	}
+
+	return delay
 }

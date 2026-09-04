@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -68,7 +69,9 @@ func (r *PostgresJobRepository) GetByID(
 			attempts,
 			max_attempts,
 			created_at,
-			updated_at
+			updated_at,
+			last_error,
+			next_attempt_at
 		FROM jobs
 		WHERE id = $1
 	`
@@ -85,6 +88,8 @@ func (r *PostgresJobRepository) GetByID(
 		&storedJob.MaxAttempts,
 		&storedJob.CreatedAt,
 		&storedJob.UpdatedAt,
+		&storedJob.LastError,
+		&storedJob.NextAttemptAt,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -99,6 +104,7 @@ func (r *PostgresJobRepository) GetByID(
 
 	return storedJob, nil
 }
+
 func (r *PostgresJobRepository) UpdateStatus(
 	ctx context.Context,
 	jobID string,
@@ -110,6 +116,14 @@ func (r *PostgresJobRepository) UpdateStatus(
 		SET
 			status = $2,
 			attempts = $3,
+			last_error = CASE
+				WHEN $2 = 'completed' THEN NULL
+				ELSE last_error
+			END,
+			next_attempt_at = CASE
+				WHEN $2 IN ('running', 'completed', 'failed') THEN NULL
+				ELSE next_attempt_at
+			END,
 			updated_at = NOW()
 		WHERE id = $1
 	`
@@ -120,6 +134,78 @@ func (r *PostgresJobRepository) UpdateStatus(
 		jobID,
 		string(status),
 		attempts,
+	)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrJobNotFound
+	}
+
+	return nil
+}
+
+func (r *PostgresJobRepository) MarkRetrying(
+	ctx context.Context,
+	jobID string,
+	attempts int,
+	lastError string,
+	nextAttemptAt time.Time,
+) error {
+	query := `
+		UPDATE jobs
+		SET
+			status = 'retrying',
+			attempts = $2,
+			last_error = $3,
+			next_attempt_at = $4,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+
+	result, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		attempts,
+		lastError,
+		nextAttemptAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrJobNotFound
+	}
+
+	return nil
+}
+
+func (r *PostgresJobRepository) MarkFailed(
+	ctx context.Context,
+	jobID string,
+	attempts int,
+	lastError string,
+) error {
+	query := `
+		UPDATE jobs
+		SET
+			status = 'failed',
+			attempts = $2,
+			last_error = $3,
+			next_attempt_at = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+
+	result, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		attempts,
+		lastError,
 	)
 	if err != nil {
 		return err

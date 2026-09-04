@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sindhoora-17/taskforge/internal/job"
 	"github.com/sindhoora-17/taskforge/internal/queue"
@@ -16,9 +17,11 @@ type statusUpdate struct {
 }
 
 type fakeRepository struct {
-	storedJob job.Job
-	getError  error
-	updates   []statusUpdate
+	storedJob     job.Job
+	getError      error
+	updates       []statusUpdate
+	lastError     string
+	nextAttemptAt time.Time
 }
 
 func (f *fakeRepository) GetByID(
@@ -46,6 +49,38 @@ func (f *fakeRepository) UpdateStatus(
 	return nil
 }
 
+func (f *fakeRepository) MarkRetrying(
+	_ context.Context,
+	_ string,
+	attempts int,
+	lastError string,
+	nextAttemptAt time.Time,
+) error {
+	f.updates = append(f.updates, statusUpdate{
+		status:   job.StatusRetrying,
+		attempts: attempts,
+	})
+
+	f.lastError = lastError
+	f.nextAttemptAt = nextAttemptAt
+
+	return nil
+}
+
+func (f *fakeRepository) MarkFailed(
+	_ context.Context,
+	_ string,
+	attempts int,
+	_ string,
+) error {
+	f.updates = append(f.updates, statusUpdate{
+		status:   job.StatusFailed,
+		attempts: attempts,
+	})
+
+	return nil
+}
+
 type fakeQueue struct {
 	acknowledged []string
 }
@@ -55,6 +90,15 @@ func (f *fakeQueue) Acknowledge(
 	messageID string,
 ) error {
 	f.acknowledged = append(f.acknowledged, messageID)
+	return nil
+}
+
+func (f *fakeQueue) ScheduleRetry(
+	_ context.Context,
+	message queue.Message,
+	_ time.Time,
+) error {
+	f.acknowledged = append(f.acknowledged, message.ID)
 	return nil
 }
 
@@ -68,6 +112,7 @@ func (f *fakeExecutor) Execute(
 	_ string,
 	_ string,
 	_ json.RawMessage,
+	_ int,
 ) error {
 	f.called = true
 	return f.err
@@ -157,7 +202,7 @@ func TestProcessorMarksFailedExecution(t *testing.T) {
 			Type:     "generate_report",
 			Payload:  json.RawMessage(`{"report_name":""}`),
 			Status:   job.StatusQueued,
-			Attempts: 0,
+			Attempts: 1,
 		},
 	}
 
@@ -243,5 +288,124 @@ func TestProcessorSkipsCompletedJob(t *testing.T) {
 
 	if len(messageQueue.acknowledged) != 1 {
 		t.Error("expected duplicate message to be acknowledged")
+	}
+}
+
+func TestProcessorSchedulesRetry(t *testing.T) {
+	fixedTime := time.Date(
+		2026,
+		time.September,
+		4,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	repository := &fakeRepository{
+		storedJob: job.Job{
+			ID:          "job-123",
+			Type:        "flaky_task",
+			Payload:     json.RawMessage(`{"failures_before_success":2}`),
+			Status:      job.StatusQueued,
+			Attempts:    0,
+			MaxAttempts: 3,
+		},
+	}
+
+	messageQueue := &fakeQueue{}
+	jobExecutor := &fakeExecutor{
+		err: errors.New("temporary failure"),
+	}
+
+	processor := NewProcessor(
+		repository,
+		messageQueue,
+		jobExecutor,
+	)
+
+	processor.now = func() time.Time {
+		return fixedTime
+	}
+
+	err := processor.Process(context.Background(), queue.Message{
+		ID:          "message-1",
+		JobID:       "job-123",
+		Type:        "flaky_task",
+		Payload:     json.RawMessage(`{"failures_before_success":2}`),
+		MaxAttempts: 3,
+	})
+
+	if err == nil {
+		t.Fatal("expected the execution attempt to fail")
+	}
+
+	if len(repository.updates) != 2 {
+		t.Fatalf(
+			"expected running and retrying updates, got %d",
+			len(repository.updates),
+		)
+	}
+
+	if repository.updates[0].status != job.StatusRunning {
+		t.Errorf(
+			"expected first status running, got %s",
+			repository.updates[0].status,
+		)
+	}
+
+	if repository.updates[1].status != job.StatusRetrying {
+		t.Errorf(
+			"expected second status retrying, got %s",
+			repository.updates[1].status,
+		)
+	}
+
+	expectedRetryTime := fixedTime.Add(time.Second)
+
+	if !repository.nextAttemptAt.Equal(expectedRetryTime) {
+		t.Errorf(
+			"expected retry at %s, got %s",
+			expectedRetryTime,
+			repository.nextAttemptAt,
+		)
+	}
+
+	if repository.lastError != "temporary failure" {
+		t.Errorf(
+			"expected stored error temporary failure, got %s",
+			repository.lastError,
+		)
+	}
+
+	if len(messageQueue.acknowledged) != 1 {
+		t.Error("expected original message to be acknowledged")
+	}
+}
+
+func TestCalculateRetryDelay(t *testing.T) {
+	tests := []struct {
+		attempt  int
+		expected time.Duration
+	}{
+		{attempt: 1, expected: time.Second},
+		{attempt: 2, expected: 2 * time.Second},
+		{attempt: 3, expected: 4 * time.Second},
+		{attempt: 4, expected: 8 * time.Second},
+		{attempt: 7, expected: time.Minute},
+	}
+
+	for _, test := range tests {
+		actual := calculateRetryDelay(test.attempt)
+
+		if actual != test.expected {
+			t.Errorf(
+				"attempt %d: expected %s, got %s",
+				test.attempt,
+				test.expected,
+				actual,
+			)
+		}
 	}
 }

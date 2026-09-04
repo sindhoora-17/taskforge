@@ -16,22 +16,31 @@ import (
 const (
 	DefaultStream        = "taskforge:jobs"
 	DefaultConsumerGroup = "taskforge-workers"
+	DefaultRetrySet      = "taskforge:retries"
 )
 
 var ErrNoMessage = errors.New("no message available")
 
 type Message struct {
-	ID          string
-	JobID       string
-	Type        string
-	Payload     json.RawMessage
-	MaxAttempts int
+	ID          string          `json:"message_id"`
+	JobID       string          `json:"job_id"`
+	Type        string          `json:"type"`
+	Payload     json.RawMessage `json:"payload"`
+	MaxAttempts int             `json:"max_attempts"`
+}
+
+type retryEntry struct {
+	JobID       string `json:"job_id"`
+	Type        string `json:"type"`
+	Payload     string `json:"payload"`
+	MaxAttempts int    `json:"max_attempts"`
 }
 
 type RedisQueue struct {
-	client *redis.Client
-	stream string
-	group  string
+	client   *redis.Client
+	stream   string
+	group    string
+	retrySet string
 }
 
 func NewRedisQueue(address string) *RedisQueue {
@@ -40,9 +49,10 @@ func NewRedisQueue(address string) *RedisQueue {
 	})
 
 	return &RedisQueue{
-		client: client,
-		stream: DefaultStream,
-		group:  DefaultConsumerGroup,
+		client:   client,
+		stream:   DefaultStream,
+		group:    DefaultConsumerGroup,
+		retrySet: DefaultRetrySet,
 	}
 }
 
@@ -166,6 +176,99 @@ func (q *RedisQueue) Acknowledge(
 		q.group,
 		messageID,
 	).Err()
+}
+
+func (q *RedisQueue) ScheduleRetry(
+	ctx context.Context,
+	message Message,
+	nextAttemptAt time.Time,
+) error {
+	entry := retryEntry{
+		JobID:       message.JobID,
+		Type:        message.Type,
+		Payload:     string(message.Payload),
+		MaxAttempts: message.MaxAttempts,
+	}
+
+	encodedEntry, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("encode retry entry: %w", err)
+	}
+
+	_, err = q.client.TxPipelined(
+		ctx,
+		func(pipe redis.Pipeliner) error {
+			pipe.ZAdd(ctx, q.retrySet, redis.Z{
+				Score:  float64(nextAttemptAt.UnixMilli()),
+				Member: string(encodedEntry),
+			})
+
+			pipe.XAck(
+				ctx,
+				q.stream,
+				q.group,
+				message.ID,
+			)
+
+			return nil
+		},
+	)
+
+	if err != nil {
+		return fmt.Errorf("schedule retry: %w", err)
+	}
+
+	return nil
+}
+
+var promoteRetriesScript = redis.NewScript(`
+	local entries = redis.call(
+		'ZRANGEBYSCORE',
+		KEYS[1],
+		'-inf',
+		ARGV[1],
+		'LIMIT',
+		0,
+		ARGV[2]
+	)
+
+	for _, entry in ipairs(entries) do
+		local job = cjson.decode(entry)
+
+		redis.call(
+			'XADD',
+			KEYS[2],
+			'*',
+			'job_id', job.job_id,
+			'type', job.type,
+			'payload', job.payload,
+			'max_attempts', tostring(job.max_attempts)
+		)
+
+		redis.call('ZREM', KEYS[1], entry)
+	end
+
+	return #entries
+`)
+
+func (q *RedisQueue) PromoteDueRetries(
+	ctx context.Context,
+	now time.Time,
+	limit int,
+) (int64, error) {
+	count, err := promoteRetriesScript.Run(
+		ctx,
+		q.client,
+		[]string{q.retrySet, q.stream},
+		now.UnixMilli(),
+		limit,
+	).Int64()
+
+	if err != nil {
+		return 0, fmt.Errorf("promote due retries: %w", err)
+	}
+
+	return count, nil
 }
 
 func (q *RedisQueue) Close() error {

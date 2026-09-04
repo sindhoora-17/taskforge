@@ -12,17 +12,20 @@ const (
 	StatusRunning   Status = "running"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
+	StatusRetrying  Status = "retrying"
 )
 
 type Job struct {
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Payload     json.RawMessage `json:"payload"`
-	Status      Status          `json:"status"`
-	Attempts    int             `json:"attempts"`
-	MaxAttempts int             `json:"max_attempts"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	Payload       json.RawMessage `json:"payload"`
+	Status        Status          `json:"status"`
+	Attempts      int             `json:"attempts"`
+	MaxAttempts   int             `json:"max_attempts"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	LastError     *string         `json:"last_error,omitempty"`
+	NextAttemptAt *time.Time      `json:"next_attempt_at,omitempty"`
 }
 
 type CreateRequest struct {

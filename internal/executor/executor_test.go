@@ -21,6 +21,7 @@ func TestExecuteGenerateReport(t *testing.T) {
 		"job-123",
 		"generate_report",
 		payload,
+		1,
 	)
 	if err != nil {
 		t.Fatalf("expected job to succeed, got %v", err)
@@ -74,6 +75,7 @@ func TestExecuteRejectsMissingReportName(t *testing.T) {
 		"job-123",
 		"generate_report",
 		payload,
+		1,
 	)
 
 	if err == nil {
@@ -89,6 +91,7 @@ func TestExecuteRejectsUnsupportedJobType(t *testing.T) {
 		"job-123",
 		"unknown_job",
 		json.RawMessage(`{}`),
+		1,
 	)
 
 	if err == nil {
