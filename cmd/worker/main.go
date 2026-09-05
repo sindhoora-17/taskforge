@@ -105,6 +105,15 @@ func main() {
 		100,
 	)
 
+	messageRecovery := worker.NewRecovery(
+		redisQueue,
+		messageProcessor,
+		consumerName+"-recovery",
+		15*time.Second,
+		5*time.Second,
+		100,
+	)
+
 	log.Printf(
 		"Worker process %s started with concurrency %d",
 		consumerName,
@@ -113,7 +122,12 @@ func main() {
 
 	var waitGroup sync.WaitGroup
 
-	waitGroup.Add(1)
+	waitGroup.Add(2)
+
+	go func() {
+		defer waitGroup.Done()
+		messageRecovery.Run(ctx)
+	}()
 
 	go func() {
 		defer waitGroup.Done()

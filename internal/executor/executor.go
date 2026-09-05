@@ -37,6 +37,18 @@ type flakyTaskResult struct {
 	CompletedAt time.Time `json:"completed_at"`
 }
 
+type slowTaskPayload struct {
+	DurationMS int `json:"duration_ms"`
+}
+
+type slowTaskResult struct {
+	JobID       string    `json:"job_id"`
+	Status      string    `json:"status"`
+	Attempt     int       `json:"attempt"`
+	DurationMS  int       `json:"duration_ms"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
 func New(outputDirectory string) *Executor {
 	return &Executor{
 		outputDirectory: outputDirectory,
@@ -59,6 +71,8 @@ func (e *Executor) Execute(
 		return e.generateReport(jobID, payload)
 	case "flaky_task":
 		return e.executeFlakyTask(jobID, payload, attempt)
+	case "slow_task":
+		return e.executeSlowTask(ctx, jobID, payload, attempt)
 	default:
 		return fmt.Errorf("unsupported job type %q", jobType)
 	}
@@ -115,6 +129,46 @@ func (e *Executor) executeFlakyTask(
 		JobID:       jobID,
 		Status:      "completed_after_retries",
 		Attempts:    attempt,
+		CompletedAt: time.Now().UTC(),
+	}
+
+	return e.writeResult(jobID, result)
+}
+
+func (e *Executor) executeSlowTask(
+	ctx context.Context,
+	jobID string,
+	payload json.RawMessage,
+	attempt int,
+) error {
+	var request slowTaskPayload
+
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return fmt.Errorf("decode slow_task payload: %w", err)
+	}
+
+	if request.DurationMS < 100 || request.DurationMS > 120000 {
+		return errors.New(
+			"duration_ms must be between 100 and 120000",
+		)
+	}
+
+	timer := time.NewTimer(
+		time.Duration(request.DurationMS) * time.Millisecond,
+	)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+
+	result := slowTaskResult{
+		JobID:       jobID,
+		Status:      "completed",
+		Attempt:     attempt,
+		DurationMS:  request.DurationMS,
 		CompletedAt: time.Now().UTC(),
 	}
 

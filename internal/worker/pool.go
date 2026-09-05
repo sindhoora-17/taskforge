@@ -16,6 +16,12 @@ type QueueReader interface {
 		ctx context.Context,
 		consumerName string,
 	) (queue.Message, error)
+
+	RefreshPending(
+		ctx context.Context,
+		consumerName string,
+		messageID string,
+	) error
 }
 
 type MessageProcessor interface {
@@ -113,7 +119,14 @@ func (p *Pool) runConsumer(
 			message.Type,
 		)
 
-		if err := p.processor.Process(ctx, message); err != nil {
+		if err := processWithHeartbeat(
+			ctx,
+			p.queue,
+			p.processor,
+			consumerName,
+			message,
+			5*time.Second,
+		); err != nil {
 			log.Printf(
 				"Consumer %s failed job %s: %v",
 				consumerName,

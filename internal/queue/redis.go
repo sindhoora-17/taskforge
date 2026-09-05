@@ -120,50 +120,52 @@ func (q *RedisQueue) Read(
 		return Message{}, ErrNoMessage
 	}
 
-	streamMessage := streams[0].Messages[0]
+	return parseStreamMessage(streams[0].Messages[0])
+}
 
-	jobID, err := readStringField(streamMessage.Values, "job_id")
+func (q *RedisQueue) ClaimStale(
+	ctx context.Context,
+	consumerName string,
+	minIdle time.Duration,
+	start string,
+	count int64,
+) ([]Message, string, error) {
+	streamMessages, nextStart, err := q.client.XAutoClaim(
+		ctx,
+		&redis.XAutoClaimArgs{
+			Stream:   q.stream,
+			Group:    q.group,
+			Consumer: consumerName,
+			MinIdle:  minIdle,
+			Start:    start,
+			Count:    count,
+		},
+	).Result()
+
+	if errors.Is(err, redis.Nil) {
+		return nil, "0-0", nil
+	}
+
 	if err != nil {
-		return Message{}, err
+		return nil, start, err
 	}
 
-	jobType, err := readStringField(streamMessage.Values, "type")
-	if err != nil {
-		return Message{}, err
+	messages := make([]Message, 0, len(streamMessages))
+
+	for _, streamMessage := range streamMessages {
+		message, err := parseStreamMessage(streamMessage)
+		if err != nil {
+			return nil, nextStart, fmt.Errorf(
+				"parse claimed message %s: %w",
+				streamMessage.ID,
+				err,
+			)
+		}
+
+		messages = append(messages, message)
 	}
 
-	payload, err := readStringField(streamMessage.Values, "payload")
-	if err != nil {
-		return Message{}, err
-	}
-
-	if !json.Valid([]byte(payload)) {
-		return Message{}, errors.New("message contains invalid JSON payload")
-	}
-
-	maxAttemptsValue, err := readStringField(
-		streamMessage.Values,
-		"max_attempts",
-	)
-	if err != nil {
-		return Message{}, err
-	}
-
-	maxAttempts, err := strconv.Atoi(maxAttemptsValue)
-	if err != nil {
-		return Message{}, fmt.Errorf(
-			"invalid max_attempts value: %w",
-			err,
-		)
-	}
-
-	return Message{
-		ID:          streamMessage.ID,
-		JobID:       jobID,
-		Type:        jobType,
-		Payload:     json.RawMessage(payload),
-		MaxAttempts: maxAttempts,
-	}, nil
+	return messages, nextStart, nil
 }
 
 func (q *RedisQueue) Acknowledge(
@@ -176,6 +178,32 @@ func (q *RedisQueue) Acknowledge(
 		q.group,
 		messageID,
 	).Err()
+}
+
+func (q *RedisQueue) RefreshPending(
+	ctx context.Context,
+	consumerName string,
+	messageID string,
+) error {
+	claimedIDs, err := q.client.XClaimJustID(
+		ctx,
+		&redis.XClaimArgs{
+			Stream:   q.stream,
+			Group:    q.group,
+			Consumer: consumerName,
+			MinIdle:  0,
+			Messages: []string{messageID},
+		},
+	).Result()
+	if err != nil {
+		return fmt.Errorf("refresh pending message: %w", err)
+	}
+
+	if len(claimedIDs) == 0 {
+		return errors.New("message is no longer pending")
+	}
+
+	return nil
 }
 
 func (q *RedisQueue) ScheduleRetry(
@@ -273,6 +301,55 @@ func (q *RedisQueue) PromoteDueRetries(
 
 func (q *RedisQueue) Close() error {
 	return q.client.Close()
+}
+
+func parseStreamMessage(
+	streamMessage redis.XMessage,
+) (Message, error) {
+	jobID, err := readStringField(streamMessage.Values, "job_id")
+	if err != nil {
+		return Message{}, err
+	}
+
+	jobType, err := readStringField(streamMessage.Values, "type")
+	if err != nil {
+		return Message{}, err
+	}
+
+	payload, err := readStringField(streamMessage.Values, "payload")
+	if err != nil {
+		return Message{}, err
+	}
+
+	if !json.Valid([]byte(payload)) {
+		return Message{}, errors.New(
+			"message contains invalid JSON payload",
+		)
+	}
+
+	maxAttemptsValue, err := readStringField(
+		streamMessage.Values,
+		"max_attempts",
+	)
+	if err != nil {
+		return Message{}, err
+	}
+
+	maxAttempts, err := strconv.Atoi(maxAttemptsValue)
+	if err != nil {
+		return Message{}, fmt.Errorf(
+			"invalid max_attempts value: %w",
+			err,
+		)
+	}
+
+	return Message{
+		ID:          streamMessage.ID,
+		JobID:       jobID,
+		Type:        jobType,
+		Payload:     json.RawMessage(payload),
+		MaxAttempts: maxAttempts,
+	}, nil
 }
 
 func readStringField(
