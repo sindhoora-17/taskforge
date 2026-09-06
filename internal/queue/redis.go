@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	DefaultStream        = "taskforge:jobs"
-	DefaultConsumerGroup = "taskforge-workers"
-	DefaultRetrySet      = "taskforge:retries"
+	DefaultStream           = "taskforge:jobs"
+	DefaultConsumerGroup    = "taskforge-workers"
+	DefaultRetrySet         = "taskforge:retries"
+	DefaultDeadLetterStream = "taskforge:dead-letter"
 )
 
 var ErrNoMessage = errors.New("no message available")
@@ -37,10 +38,11 @@ type retryEntry struct {
 }
 
 type RedisQueue struct {
-	client   *redis.Client
-	stream   string
-	group    string
-	retrySet string
+	client           *redis.Client
+	stream           string
+	group            string
+	retrySet         string
+	deadLetterStream string
 }
 
 func NewRedisQueue(address string) *RedisQueue {
@@ -49,10 +51,11 @@ func NewRedisQueue(address string) *RedisQueue {
 	})
 
 	return &RedisQueue{
-		client:   client,
-		stream:   DefaultStream,
-		group:    DefaultConsumerGroup,
-		retrySet: DefaultRetrySet,
+		client:           client,
+		stream:           DefaultStream,
+		group:            DefaultConsumerGroup,
+		retrySet:         DefaultRetrySet,
+		deadLetterStream: DefaultDeadLetterStream,
 	}
 }
 
@@ -244,6 +247,46 @@ func (q *RedisQueue) ScheduleRetry(
 
 	if err != nil {
 		return fmt.Errorf("schedule retry: %w", err)
+	}
+
+	return nil
+}
+
+func (q *RedisQueue) MoveToDeadLetter(
+	ctx context.Context,
+	message Message,
+	attempts int,
+	lastError string,
+) error {
+	_, err := q.client.TxPipelined(
+		ctx,
+		func(pipe redis.Pipeliner) error {
+			pipe.XAdd(ctx, &redis.XAddArgs{
+				Stream: q.deadLetterStream,
+				Values: map[string]any{
+					"job_id":              message.JobID,
+					"type":                message.Type,
+					"payload":             string(message.Payload),
+					"attempts":            attempts,
+					"max_attempts":        message.MaxAttempts,
+					"last_error":          lastError,
+					"failed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+					"original_message_id": message.ID,
+				},
+			})
+
+			pipe.XAck(
+				ctx,
+				q.stream,
+				q.group,
+				message.ID,
+			)
+
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("move job to dead-letter queue: %w", err)
 	}
 
 	return nil

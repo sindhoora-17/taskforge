@@ -49,6 +49,13 @@ type MessageQueue interface {
 		message queue.Message,
 		nextAttemptAt time.Time,
 	) error
+
+	MoveToDeadLetter(
+		ctx context.Context,
+		message queue.Message,
+		attempts int,
+		lastError string,
+	) error
 }
 
 type Executor interface {
@@ -169,9 +176,14 @@ func (p *Processor) Process(
 			)
 		}
 
-		if err := p.queue.Acknowledge(ctx, message.ID); err != nil {
+		if err := p.queue.MoveToDeadLetter(
+			ctx,
+			message,
+			attempts,
+			executionErr.Error(),
+		); err != nil {
 			return fmt.Errorf(
-				"execution failed (%v) and acknowledgement failed: %w",
+				"execution failed (%v) and dead-letter operation failed: %w",
 				executionErr,
 				err,
 			)

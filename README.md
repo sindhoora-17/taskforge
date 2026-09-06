@@ -1,6 +1,6 @@
 # TaskForge
 
-TaskForge is an in-progress distributed job execution platform written in Go. The API accepts background jobs, stores their state in PostgreSQL, and publishes them to Redis Streams for asynchronous processing.
+TaskForge is a distributed background job execution platform written in Go. It accepts jobs through an HTTP API, persists job state in PostgreSQL, distributes work using Redis Streams, and executes jobs across concurrent, horizontally scalable worker processes with retries and crash recovery.
 
 > **Project status:** End-to-end distributed job execution is operational. Automatic retries, crash recovery, and production observability are currently under development.
 
@@ -20,7 +20,7 @@ TaskForge is an in-progress distributed job execution platform written in Go. Th
 - Redis Streams consumer-group processing
 - Separate API and worker services
 - Asynchronous job execution
-- Job lifecycle updates (`queued`, `running`, `completed`, and `failed`)
+- Job lifecycle updates (`queued`, `running`, `retrying`, `completed`, and `failed`)
 - Redis message acknowledgements
 - JSON report generation
 - Configurable concurrent worker pools
@@ -28,6 +28,13 @@ TaskForge is an in-progress distributed job execution platform written in Go. Th
 - Redis consumer-group distribution across worker instances
 - Multi-stage Docker application builds
 - Executor and worker-processing unit tests
+- Automatic retries with exponential backoff
+- Redis sorted-set scheduling for delayed retries
+- Persistent retry errors and next-attempt timestamps
+- Worker heartbeats for long-running jobs
+- Automatic stale-message recovery after worker crashes
+- Redis Streams dead-letter queue for exhausted jobs
+- Dead-letter failure metadata including attempts, errors, and original message IDs
 
 ## Current Flow
 
@@ -157,10 +164,9 @@ go test -v ./...
 
 ## Planned Features
 
-- Automatic retries with exponential backoff
-- Worker crash recovery
+- Reliable PostgreSQL-to-Redis delivery using a transactional outbox
 - Scheduled and priority jobs
-- Job cancellation and timeouts
-- Dead-letter queue
+- Job cancellation and execution timeouts
 - Metrics and distributed tracing
+- Integration tests with PostgreSQL and Redis
 - Load testing and performance benchmarks

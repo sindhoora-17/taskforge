@@ -81,8 +81,15 @@ func (f *fakeRepository) MarkFailed(
 	return nil
 }
 
+type deadLetterRecord struct {
+	message   queue.Message
+	attempts  int
+	lastError string
+}
+
 type fakeQueue struct {
 	acknowledged []string
+	deadLettered []deadLetterRecord
 }
 
 func (f *fakeQueue) Acknowledge(
@@ -99,6 +106,24 @@ func (f *fakeQueue) ScheduleRetry(
 	_ time.Time,
 ) error {
 	f.acknowledged = append(f.acknowledged, message.ID)
+	return nil
+}
+
+func (f *fakeQueue) MoveToDeadLetter(
+	_ context.Context,
+	message queue.Message,
+	attempts int,
+	lastError string,
+) error {
+	f.deadLettered = append(
+		f.deadLettered,
+		deadLetterRecord{
+			message:   message,
+			attempts:  attempts,
+			lastError: lastError,
+		},
+	)
+
 	return nil
 }
 
@@ -198,11 +223,12 @@ func TestProcessorCompletesJob(t *testing.T) {
 func TestProcessorMarksFailedExecution(t *testing.T) {
 	repository := &fakeRepository{
 		storedJob: job.Job{
-			ID:       "job-123",
-			Type:     "generate_report",
-			Payload:  json.RawMessage(`{"report_name":""}`),
-			Status:   job.StatusQueued,
-			Attempts: 1,
+			ID:          "job-123",
+			Type:        "generate_report",
+			Payload:     json.RawMessage(`{"report_name":""}`),
+			Status:      job.StatusQueued,
+			Attempts:    1,
+			MaxAttempts: 2,
 		},
 	}
 
@@ -218,8 +244,11 @@ func TestProcessorMarksFailedExecution(t *testing.T) {
 	)
 
 	err := processor.Process(context.Background(), queue.Message{
-		ID:    "message-1",
-		JobID: "job-123",
+		ID:          "message-1",
+		JobID:       "job-123",
+		Type:        "generate_report",
+		Payload:     json.RawMessage(`{"report_name":""}`),
+		MaxAttempts: 2,
 	})
 
 	if err == nil {
@@ -247,8 +276,38 @@ func TestProcessorMarksFailedExecution(t *testing.T) {
 		)
 	}
 
-	if len(messageQueue.acknowledged) != 1 {
-		t.Error("expected failed message to be acknowledged")
+	if len(messageQueue.deadLettered) != 1 {
+		t.Fatalf(
+			"expected one dead-lettered message, got %d",
+			len(messageQueue.deadLettered),
+		)
+	}
+
+	deadLetter := messageQueue.deadLettered[0]
+
+	if deadLetter.message.ID != "message-1" {
+		t.Errorf(
+			"expected message-1, got %s",
+			deadLetter.message.ID,
+		)
+	}
+
+	if deadLetter.attempts != 2 {
+		t.Errorf(
+			"expected 2 attempts, got %d",
+			deadLetter.attempts,
+		)
+	}
+
+	if deadLetter.lastError != "execution failed" {
+		t.Errorf(
+			"expected execution failed error, got %s",
+			deadLetter.lastError,
+		)
+	}
+
+	if len(messageQueue.acknowledged) != 0 {
+		t.Error("dead-lettered message should not be acknowledged separately")
 	}
 }
 
