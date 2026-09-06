@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/sindhoora-17/taskforge/internal/job"
+	"github.com/sindhoora-17/taskforge/internal/outbox"
 	taskqueue "github.com/sindhoora-17/taskforge/internal/queue"
 	"github.com/sindhoora-17/taskforge/internal/repository"
 )
@@ -23,13 +24,8 @@ type jobRepository interface {
 	GetByID(ctx context.Context, jobID string) (job.Job, error)
 }
 
-type jobQueue interface {
-	Enqueue(ctx context.Context, newJob job.Job) (string, error)
-}
-
 type api struct {
-	jobs  jobRepository
-	queue jobQueue
+	jobs jobRepository
 }
 
 func main() {
@@ -74,10 +70,19 @@ func main() {
 
 	log.Println("Connected to Redis")
 
+	jobRepository := repository.NewPostgresJobRepository(pool)
+
 	handler := &api{
-		jobs:  repository.NewPostgresJobRepository(pool),
-		queue: redisQueue,
+		jobs: jobRepository,
 	}
+
+	outboxDispatcher := outbox.NewDispatcher(
+		pool,
+		redisQueue,
+		250*time.Millisecond,
+	)
+
+	go outboxDispatcher.Run(ctx)
 
 	mux := http.NewServeMux()
 
@@ -171,20 +176,9 @@ func (a *api) createJobHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageID, err := a.queue.Enqueue(r.Context(), newJob)
-	if err != nil {
-		log.Printf("failed to enqueue job %s: %v", newJob.ID, err)
-
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "job could not be queued",
-		})
-		return
-	}
-
 	log.Printf(
-		"Queued job %s as Redis message %s",
+		"Created job %s with a pending outbox event",
 		newJob.ID,
-		messageID,
 	)
 
 	writeJSON(w, http.StatusAccepted, newJob)

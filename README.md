@@ -35,6 +35,10 @@ TaskForge is a distributed background job execution platform written in Go. It a
 - Automatic stale-message recovery after worker crashes
 - Redis Streams dead-letter queue for exhausted jobs
 - Dead-letter failure metadata including attempts, errors, and original message IDs
+- Transactional outbox for reliable PostgreSQL-to-Redis delivery
+- Background outbox dispatcher using PostgreSQL row locking
+- Persistent exponential backoff for Redis publishing failures
+- Automatic delivery recovery after Redis outages
 
 ## Current Flow
 
@@ -164,7 +168,7 @@ go test -v ./...
 
 ## Planned Features
 
-- Reliable PostgreSQL-to-Redis delivery using a transactional outbox
+- Atomic job claiming and stronger duplicate-execution protection
 - Scheduled and priority jobs
 - Job cancellation and execution timeouts
 - Metrics and distributed tracing

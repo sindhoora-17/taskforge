@@ -47,11 +47,8 @@ func TestCreateJobHandler(t *testing.T) {
 		jobs: make(map[string]job.Job),
 	}
 
-	queue := &fakeJobQueue{}
-
 	handler := &api{
-		jobs:  repository,
-		queue: queue,
+		jobs: repository,
 	}
 
 	body := strings.NewReader(`{
@@ -108,14 +105,6 @@ func TestCreateJobHandler(t *testing.T) {
 
 	if _, exists := repository.jobs[createdJob.ID]; !exists {
 		t.Error("expected created job to be stored")
-	}
-
-	if len(queue.jobs) != 1 {
-		t.Fatalf("expected one queued job, got %d", len(queue.jobs))
-	}
-
-	if queue.jobs[0].ID != createdJob.ID {
-		t.Error("expected stored and queued jobs to have the same ID")
 	}
 }
 

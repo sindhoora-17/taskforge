@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,7 +27,16 @@ func (r *PostgresJobRepository) Create(
 	ctx context.Context,
 	newJob job.Job,
 ) error {
-	query := `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin job creation transaction: %w", err)
+	}
+
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	createJobQuery := `
 		INSERT INTO jobs (
 			id,
 			type,
@@ -40,9 +50,9 @@ func (r *PostgresJobRepository) Create(
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
-	_, err := r.pool.Exec(
+	_, err = tx.Exec(
 		ctx,
-		query,
+		createJobQuery,
 		newJob.ID,
 		newJob.Type,
 		newJob.Payload,
@@ -52,8 +62,28 @@ func (r *PostgresJobRepository) Create(
 		newJob.CreatedAt,
 		newJob.UpdatedAt,
 	)
+	if err != nil {
+		return fmt.Errorf("insert job: %w", err)
+	}
 
-	return err
+	createOutboxQuery := `
+		INSERT INTO job_outbox (job_id)
+		VALUES ($1)
+	`
+
+	if _, err := tx.Exec(
+		ctx,
+		createOutboxQuery,
+		newJob.ID,
+	); err != nil {
+		return fmt.Errorf("insert job outbox event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit job creation transaction: %w", err)
+	}
+
+	return nil
 }
 
 func (r *PostgresJobRepository) GetByID(
