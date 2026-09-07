@@ -22,6 +22,7 @@ type fakeRepository struct {
 	updates       []statusUpdate
 	lastError     string
 	nextAttemptAt time.Time
+	claimRejected bool
 }
 
 func (f *fakeRepository) GetByID(
@@ -33,6 +34,34 @@ func (f *fakeRepository) GetByID(
 	}
 
 	return f.storedJob, nil
+}
+
+func (f *fakeRepository) ClaimForExecution(
+	_ context.Context,
+	_ string,
+	expectedStatus job.Status,
+	expectedAttempts int,
+) (bool, error) {
+	if f.claimRejected {
+		return false, nil
+	}
+
+	if f.storedJob.Status != expectedStatus ||
+		f.storedJob.Attempts != expectedAttempts {
+		return false, nil
+	}
+
+	attempts := expectedAttempts + 1
+
+	f.updates = append(f.updates, statusUpdate{
+		status:   job.StatusRunning,
+		attempts: attempts,
+	})
+
+	f.storedJob.Status = job.StatusRunning
+	f.storedJob.Attempts = attempts
+
+	return true, nil
 }
 
 func (f *fakeRepository) UpdateStatus(
@@ -466,5 +495,48 @@ func TestCalculateRetryDelay(t *testing.T) {
 				actual,
 			)
 		}
+	}
+}
+
+func TestProcessorSkipsJobWhenAtomicClaimFails(t *testing.T) {
+	repository := &fakeRepository{
+		storedJob: job.Job{
+			ID:          "job-123",
+			Type:        "generate_report",
+			Payload:     json.RawMessage(`{"report_name":"test"}`),
+			Status:      job.StatusQueued,
+			Attempts:    0,
+			MaxAttempts: 3,
+		},
+		claimRejected: true,
+	}
+
+	messageQueue := &fakeQueue{}
+	jobExecutor := &fakeExecutor{}
+
+	processor := NewProcessor(
+		repository,
+		messageQueue,
+		jobExecutor,
+	)
+
+	err := processor.Process(context.Background(), queue.Message{
+		ID:    "message-1",
+		JobID: "job-123",
+	})
+	if err != nil {
+		t.Fatalf("expected duplicate claim to be handled, got %v", err)
+	}
+
+	if jobExecutor.called {
+		t.Error("job should not execute when atomic claim fails")
+	}
+
+	if len(repository.updates) != 0 {
+		t.Error("unclaimed job should not receive status updates")
+	}
+
+	if len(messageQueue.acknowledged) != 1 {
+		t.Error("duplicate message should be acknowledged")
 	}
 }

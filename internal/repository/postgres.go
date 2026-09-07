@@ -247,3 +247,35 @@ func (r *PostgresJobRepository) MarkFailed(
 
 	return nil
 }
+
+func (r *PostgresJobRepository) ClaimForExecution(
+	ctx context.Context,
+	jobID string,
+	expectedStatus job.Status,
+	expectedAttempts int,
+) (bool, error) {
+	query := `
+		UPDATE jobs
+		SET
+			status = 'running',
+			attempts = attempts + 1,
+			next_attempt_at = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+			AND status = $2
+			AND attempts = $3
+	`
+
+	result, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		string(expectedStatus),
+		expectedAttempts,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return result.RowsAffected() == 1, nil
+}

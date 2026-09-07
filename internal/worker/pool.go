@@ -16,12 +16,6 @@ type QueueReader interface {
 		ctx context.Context,
 		consumerName string,
 	) (queue.Message, error)
-
-	RefreshPending(
-		ctx context.Context,
-		consumerName string,
-		messageID string,
-	) error
 }
 
 type MessageProcessor interface {
@@ -75,8 +69,9 @@ func (p *Pool) runConsumer(
 	consumerName string,
 ) {
 	log.Printf("Consumer %s started", consumerName)
-
 	defer log.Printf("Consumer %s stopped", consumerName)
+
+	consecutiveReadFailures := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -86,6 +81,7 @@ func (p *Pool) runConsumer(
 		message, err := p.queue.Read(ctx, consumerName)
 
 		if errors.Is(err, queue.ErrNoMessage) {
+			consecutiveReadFailures = 0
 			continue
 		}
 
@@ -94,23 +90,36 @@ func (p *Pool) runConsumer(
 				return
 			}
 
-			log.Printf(
-				"Consumer %s failed to read message: %v",
-				consumerName,
-				err,
+			consecutiveReadFailures++
+
+			retryDelay := calculateDependencyBackoff(
+				consecutiveReadFailures,
 			)
 
-			timer := time.NewTimer(time.Second)
+			log.Printf(
+				"Consumer %s failed to read message: %v; retrying in %s",
+				consumerName,
+				err,
+				retryDelay,
+			)
+
+			timer := time.NewTimer(retryDelay)
 
 			select {
 			case <-ctx.Done():
-				timer.Stop()
+				if !timer.Stop() {
+					<-timer.C
+				}
+
 				return
+
 			case <-timer.C:
 			}
 
 			continue
 		}
+
+		consecutiveReadFailures = 0
 
 		log.Printf(
 			"Consumer %s received job %s (%s)",
@@ -119,25 +128,19 @@ func (p *Pool) runConsumer(
 			message.Type,
 		)
 
-		if err := processWithHeartbeat(
-			ctx,
-			p.queue,
-			p.processor,
-			consumerName,
-			message,
-			5*time.Second,
-		); err != nil {
+		if err := p.processor.Process(ctx, message); err != nil {
 			log.Printf(
 				"Consumer %s failed job %s: %v",
 				consumerName,
 				message.JobID,
 				err,
 			)
+
 			continue
 		}
 
 		log.Printf(
-			"Consumer %s completed job %s",
+			"Consumer %s processed job %s",
 			consumerName,
 			message.JobID,
 		)

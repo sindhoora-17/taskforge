@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -35,39 +36,62 @@ func NewRetryScheduler(
 }
 
 func (s *RetryScheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-
 	log.Println("Retry scheduler started")
 	defer log.Println("Retry scheduler stopped")
 
-	s.promote(ctx)
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	consecutiveFailures := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.promote(ctx)
+
+		case <-timer.C:
+			err := s.promote(ctx)
+
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+
+				consecutiveFailures++
+
+				retryDelay := calculateDependencyBackoff(
+					consecutiveFailures,
+				)
+
+				log.Printf(
+					"Failed to promote due retries: %v; retrying in %s",
+					err,
+					retryDelay,
+				)
+
+				timer.Reset(retryDelay)
+				continue
+			}
+
+			consecutiveFailures = 0
+			timer.Reset(s.interval)
 		}
 	}
 }
 
-func (s *RetryScheduler) promote(ctx context.Context) {
+func (s *RetryScheduler) promote(ctx context.Context) error {
 	count, err := s.queue.PromoteDueRetries(
 		ctx,
 		s.now().UTC(),
 		s.batchSize,
 	)
 	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("failed to promote due retries: %v", err)
-		}
-
-		return
+		return fmt.Errorf("promote due retries: %w", err)
 	}
 
 	if count > 0 {
 		log.Printf("Promoted %d due retry jobs", count)
 	}
+
+	return nil
 }

@@ -28,6 +28,7 @@ type Message struct {
 	Type        string          `json:"type"`
 	Payload     json.RawMessage `json:"payload"`
 	MaxAttempts int             `json:"max_attempts"`
+	Recovered   bool            `json:"-"`
 }
 
 type retryEntry struct {
@@ -165,6 +166,7 @@ func (q *RedisQueue) ClaimStale(
 			)
 		}
 
+		message.Recovered = true
 		messages = append(messages, message)
 	}
 

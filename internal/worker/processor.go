@@ -16,7 +16,17 @@ const (
 )
 
 type Repository interface {
-	GetByID(ctx context.Context, jobID string) (job.Job, error)
+	GetByID(
+		ctx context.Context,
+		jobID string,
+	) (job.Job, error)
+
+	ClaimForExecution(
+		ctx context.Context,
+		jobID string,
+		expectedStatus job.Status,
+		expectedAttempts int,
+	) (bool, error)
 
 	UpdateStatus(
 		ctx context.Context,
@@ -42,7 +52,10 @@ type Repository interface {
 }
 
 type MessageQueue interface {
-	Acknowledge(ctx context.Context, messageID string) error
+	Acknowledge(
+		ctx context.Context,
+		messageID string,
+	) error
 
 	ScheduleRetry(
 		ctx context.Context,
@@ -97,24 +110,42 @@ func (p *Processor) Process(
 		return fmt.Errorf("retrieve job: %w", err)
 	}
 
-	if storedJob.Status == job.StatusCompleted {
+	if storedJob.Status == job.StatusCompleted ||
+		storedJob.Status == job.StatusFailed {
 		if err := p.queue.Acknowledge(ctx, message.ID); err != nil {
-			return fmt.Errorf("acknowledge completed job: %w", err)
+			return fmt.Errorf("acknowledge terminal job: %w", err)
+		}
+
+		return nil
+	}
+
+	if storedJob.Status == job.StatusRunning && !message.Recovered {
+		if err := p.queue.Acknowledge(ctx, message.ID); err != nil {
+			return fmt.Errorf("acknowledge duplicate message: %w", err)
+		}
+
+		return nil
+	}
+
+	claimed, err := p.repository.ClaimForExecution(
+		ctx,
+		storedJob.ID,
+		storedJob.Status,
+		storedJob.Attempts,
+	)
+	if err != nil {
+		return fmt.Errorf("claim job for execution: %w", err)
+	}
+
+	if !claimed {
+		if err := p.queue.Acknowledge(ctx, message.ID); err != nil {
+			return fmt.Errorf("acknowledge unclaimed message: %w", err)
 		}
 
 		return nil
 	}
 
 	attempts := storedJob.Attempts + 1
-
-	if err := p.repository.UpdateStatus(
-		ctx,
-		storedJob.ID,
-		job.StatusRunning,
-		attempts,
-	); err != nil {
-		return fmt.Errorf("mark job as running: %w", err)
-	}
 
 	executionErr := p.executor.Execute(
 		ctx,
