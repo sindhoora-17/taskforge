@@ -1,4 +1,5 @@
 # TaskForge
+[![CI](https://github.com/sindhoora-17/taskforge/actions/workflows/ci.yml/badge.svg)](https://github.com/sindhoora-17/taskforge/actions/workflows/ci.yml)
 
 TaskForge is a distributed background job execution platform written in Go. It accepts jobs through an HTTP API, stores job state in PostgreSQL, publishes work through Redis Streams, and executes jobs across concurrent, horizontally scalable worker processes.
 
