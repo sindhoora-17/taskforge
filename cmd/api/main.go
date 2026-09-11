@@ -22,6 +22,7 @@ import (
 type jobRepository interface {
 	Create(ctx context.Context, newJob job.Job) error
 	GetByID(ctx context.Context, jobID string) (job.Job, error)
+	GetMetrics(ctx context.Context) (job.Metrics, error)
 }
 
 type api struct {
@@ -89,6 +90,7 @@ func main() {
 	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("POST /jobs", handler.createJobHandler)
 	mux.HandleFunc("GET /jobs/{id}", handler.getJobHandler)
+	mux.HandleFunc("GET /metrics", handler.metricsHandler)
 
 	server := &http.Server{
 		Addr:              ":8080",
@@ -108,6 +110,27 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "healthy",
 		"service": "taskforge-api",
 	})
+}
+
+func (a *api) metricsHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	metrics, err := a.jobs.GetMetrics(r.Context())
+	if err != nil {
+		log.Printf("failed to retrieve metrics: %v", err)
+
+		writeJSON(
+			w,
+			http.StatusInternalServerError,
+			map[string]string{
+				"error": "failed to retrieve metrics",
+			},
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, metrics)
 }
 
 func (a *api) createJobHandler(w http.ResponseWriter, r *http.Request) {
@@ -154,17 +177,29 @@ func (a *api) createJobHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if request.TimeoutSeconds == 0 {
+		request.TimeoutSeconds = 30
+	}
+
+	if request.TimeoutSeconds < 1 || request.TimeoutSeconds > 3600 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "timeout_seconds must be between 1 and 3600",
+		})
+		return
+	}
+
 	now := time.Now().UTC()
 
 	newJob := job.Job{
-		ID:          uuid.NewString(),
-		Type:        request.Type,
-		Payload:     request.Payload,
-		Status:      job.StatusQueued,
-		Attempts:    0,
-		MaxAttempts: request.MaxAttempts,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:             uuid.NewString(),
+		Type:           request.Type,
+		Payload:        request.Payload,
+		Status:         job.StatusQueued,
+		Attempts:       0,
+		MaxAttempts:    request.MaxAttempts,
+		TimeoutSeconds: request.TimeoutSeconds,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	if err := a.jobs.Create(r.Context(), newJob); err != nil {

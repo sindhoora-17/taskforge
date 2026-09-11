@@ -37,18 +37,19 @@ func (r *PostgresJobRepository) Create(
 	}()
 
 	createJobQuery := `
-		INSERT INTO jobs (
-			id,
-			type,
-			payload,
-			status,
-			attempts,
-			max_attempts,
-			created_at,
-			updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`
+	INSERT INTO jobs (
+		id,
+		type,
+		payload,
+		status,
+		attempts,
+		max_attempts,
+		timeout_seconds,
+		created_at,
+		updated_at
+	)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+`
 
 	_, err = tx.Exec(
 		ctx,
@@ -59,6 +60,7 @@ func (r *PostgresJobRepository) Create(
 		string(newJob.Status),
 		newJob.Attempts,
 		newJob.MaxAttempts,
+		newJob.TimeoutSeconds,
 		newJob.CreatedAt,
 		newJob.UpdatedAt,
 	)
@@ -98,6 +100,7 @@ func (r *PostgresJobRepository) GetByID(
 			status,
 			attempts,
 			max_attempts,
+			timeout_seconds,
 			created_at,
 			updated_at,
 			last_error,
@@ -116,6 +119,7 @@ func (r *PostgresJobRepository) GetByID(
 		&status,
 		&storedJob.Attempts,
 		&storedJob.MaxAttempts,
+		&storedJob.TimeoutSeconds,
 		&storedJob.CreatedAt,
 		&storedJob.UpdatedAt,
 		&storedJob.LastError,
@@ -278,4 +282,44 @@ func (r *PostgresJobRepository) ClaimForExecution(
 	}
 
 	return result.RowsAffected() == 1, nil
+}
+
+func (r *PostgresJobRepository) GetMetrics(
+	ctx context.Context,
+) (job.Metrics, error) {
+	query := `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status = 'queued'),
+			COUNT(*) FILTER (WHERE status = 'running'),
+			COUNT(*) FILTER (WHERE status = 'retrying'),
+			COUNT(*) FILTER (WHERE status = 'completed'),
+			COUNT(*) FILTER (WHERE status = 'failed'),
+			(
+				SELECT COUNT(*)
+				FROM job_outbox
+				WHERE published_at IS NULL
+			)
+		FROM jobs
+	`
+
+	var metrics job.Metrics
+
+	err := r.pool.QueryRow(ctx, query).Scan(
+		&metrics.Total,
+		&metrics.Queued,
+		&metrics.Running,
+		&metrics.Retrying,
+		&metrics.Completed,
+		&metrics.Failed,
+		&metrics.PendingOutbox,
+	)
+	if err != nil {
+		return job.Metrics{}, fmt.Errorf(
+			"retrieve job metrics: %w",
+			err,
+		)
+	}
+
+	return metrics, nil
 }

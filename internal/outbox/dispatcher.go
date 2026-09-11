@@ -109,6 +109,7 @@ func (d *Dispatcher) dispatchNext(
 			jobs.status,
 			jobs.attempts,
 			jobs.max_attempts,
+			jobs.timeout_seconds,
 			jobs.created_at,
 			jobs.updated_at
 		FROM job_outbox AS outbox
@@ -141,6 +142,7 @@ ORDER BY
 		&status,
 		&storedJob.Attempts,
 		&storedJob.MaxAttempts,
+		&storedJob.TimeoutSeconds,
 		&storedJob.CreatedAt,
 		&storedJob.UpdatedAt,
 	)

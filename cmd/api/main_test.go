@@ -103,6 +103,13 @@ func TestCreateJobHandler(t *testing.T) {
 		)
 	}
 
+	if createdJob.TimeoutSeconds != 30 {
+		t.Errorf(
+			"expected default timeout to be 30 seconds, got %d",
+			createdJob.TimeoutSeconds,
+		)
+	}
+
 	if _, exists := repository.jobs[createdJob.ID]; !exists {
 		t.Error("expected created job to be stored")
 	}
@@ -138,5 +145,129 @@ func TestCreateJobHandlerRejectsMissingType(t *testing.T) {
 
 	if len(repository.jobs) != 0 {
 		t.Error("invalid job should not be stored")
+	}
+}
+
+func TestCreateJobHandlerRejectsInvalidTimeout(t *testing.T) {
+	repository := &fakeJobRepository{
+		jobs: make(map[string]job.Job),
+	}
+
+	handler := &api{
+		jobs: repository,
+	}
+
+	body := strings.NewReader(`{
+		"type": "generate_report",
+		"payload": {
+			"report_name": "monthly-sales"
+		},
+		"timeout_seconds": 3601
+	}`)
+
+	request := httptest.NewRequest(http.MethodPost, "/jobs", body)
+	response := httptest.NewRecorder()
+
+	handler.createJobHandler(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			response.Code,
+		)
+	}
+
+	if len(repository.jobs) != 0 {
+		t.Error("job with invalid timeout should not be stored")
+	}
+}
+
+func (f *fakeJobRepository) GetMetrics(
+	_ context.Context,
+) (job.Metrics, error) {
+	var metrics job.Metrics
+
+	for _, storedJob := range f.jobs {
+		metrics.Total++
+
+		switch storedJob.Status {
+		case job.StatusQueued:
+			metrics.Queued++
+		case job.StatusRunning:
+			metrics.Running++
+		case job.StatusRetrying:
+			metrics.Retrying++
+		case job.StatusCompleted:
+			metrics.Completed++
+		case job.StatusFailed:
+			metrics.Failed++
+		}
+	}
+
+	return metrics, nil
+}
+
+func TestMetricsHandler(t *testing.T) {
+	repository := &fakeJobRepository{
+		jobs: map[string]job.Job{
+			"job-1": {
+				ID:     "job-1",
+				Status: job.StatusCompleted,
+			},
+			"job-2": {
+				ID:     "job-2",
+				Status: job.StatusCompleted,
+			},
+			"job-3": {
+				ID:     "job-3",
+				Status: job.StatusFailed,
+			},
+		},
+	}
+
+	handler := &api{
+		jobs: repository,
+	}
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/metrics",
+		nil,
+	)
+	response := httptest.NewRecorder()
+
+	handler.metricsHandler(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusOK,
+			response.Code,
+		)
+	}
+
+	var metrics job.Metrics
+
+	if err := json.NewDecoder(response.Body).Decode(&metrics); err != nil {
+		t.Fatalf("failed to decode metrics response: %v", err)
+	}
+
+	if metrics.Total != 3 {
+		t.Errorf("expected 3 total jobs, got %d", metrics.Total)
+	}
+
+	if metrics.Completed != 2 {
+		t.Errorf(
+			"expected 2 completed jobs, got %d",
+			metrics.Completed,
+		)
+	}
+
+	if metrics.Failed != 1 {
+		t.Errorf(
+			"expected 1 failed job, got %d",
+			metrics.Failed,
+		)
 	}
 }

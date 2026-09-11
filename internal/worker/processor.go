@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,8 +12,9 @@ import (
 )
 
 const (
-	baseRetryDelay = time.Second
-	maxRetryDelay  = time.Minute
+	baseRetryDelay    = time.Second
+	maxRetryDelay     = time.Minute
+	defaultJobTimeout = 30 * time.Second
 )
 
 type Repository interface {
@@ -86,6 +88,7 @@ type Processor struct {
 	queue      MessageQueue
 	executor   Executor
 	now        func() time.Time
+	timeoutFor func(job.Job) time.Duration
 }
 
 func NewProcessor(
@@ -98,6 +101,15 @@ func NewProcessor(
 		queue:      queue,
 		executor:   executor,
 		now:        time.Now,
+		timeoutFor: func(storedJob job.Job) time.Duration {
+			if storedJob.TimeoutSeconds <= 0 {
+				return defaultJobTimeout
+			}
+
+			return time.Duration(
+				storedJob.TimeoutSeconds,
+			) * time.Second
+		},
 	}
 }
 
@@ -146,14 +158,31 @@ func (p *Processor) Process(
 	}
 
 	attempts := storedJob.Attempts + 1
+	executionTimeout := p.timeoutFor(storedJob)
+
+	executionContext, cancelExecution := context.WithTimeout(
+		ctx,
+		executionTimeout,
+	)
 
 	executionErr := p.executor.Execute(
-		ctx,
+		executionContext,
 		storedJob.ID,
 		storedJob.Type,
 		storedJob.Payload,
 		attempts,
 	)
+
+	executionContextErr := executionContext.Err()
+	cancelExecution()
+
+	if errors.Is(executionContextErr, context.DeadlineExceeded) {
+		executionErr = fmt.Errorf(
+			"job execution timed out after %s: %w",
+			executionTimeout,
+			context.DeadlineExceeded,
+		)
+	}
 
 	if executionErr != nil {
 		if attempts < storedJob.MaxAttempts {

@@ -23,19 +23,21 @@ const (
 var ErrNoMessage = errors.New("no message available")
 
 type Message struct {
-	ID          string          `json:"message_id"`
-	JobID       string          `json:"job_id"`
-	Type        string          `json:"type"`
-	Payload     json.RawMessage `json:"payload"`
-	MaxAttempts int             `json:"max_attempts"`
-	Recovered   bool            `json:"-"`
+	ID             string          `json:"message_id"`
+	JobID          string          `json:"job_id"`
+	Type           string          `json:"type"`
+	Payload        json.RawMessage `json:"payload"`
+	MaxAttempts    int             `json:"max_attempts"`
+	TimeoutSeconds int             `json:"timeout_seconds"`
+	Recovered      bool            `json:"-"`
 }
 
 type retryEntry struct {
-	JobID       string `json:"job_id"`
-	Type        string `json:"type"`
-	Payload     string `json:"payload"`
-	MaxAttempts int    `json:"max_attempts"`
+	JobID          string `json:"job_id"`
+	Type           string `json:"type"`
+	Payload        string `json:"payload"`
+	MaxAttempts    int    `json:"max_attempts"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 type RedisQueue struct {
@@ -86,10 +88,11 @@ func (q *RedisQueue) Enqueue(
 	messageID, err := q.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: q.stream,
 		Values: map[string]any{
-			"job_id":       newJob.ID,
-			"type":         newJob.Type,
-			"payload":      string(newJob.Payload),
-			"max_attempts": newJob.MaxAttempts,
+			"job_id":          newJob.ID,
+			"type":            newJob.Type,
+			"payload":         string(newJob.Payload),
+			"max_attempts":    newJob.MaxAttempts,
+			"timeout_seconds": newJob.TimeoutSeconds,
 		},
 	}).Result()
 
@@ -217,10 +220,11 @@ func (q *RedisQueue) ScheduleRetry(
 	nextAttemptAt time.Time,
 ) error {
 	entry := retryEntry{
-		JobID:       message.JobID,
-		Type:        message.Type,
-		Payload:     string(message.Payload),
-		MaxAttempts: message.MaxAttempts,
+		JobID:          message.JobID,
+		Type:           message.Type,
+		Payload:        string(message.Payload),
+		MaxAttempts:    message.MaxAttempts,
+		TimeoutSeconds: message.TimeoutSeconds,
 	}
 
 	encodedEntry, err := json.Marshal(entry)
@@ -271,6 +275,7 @@ func (q *RedisQueue) MoveToDeadLetter(
 					"payload":             string(message.Payload),
 					"attempts":            attempts,
 					"max_attempts":        message.MaxAttempts,
+					"timeout_seconds":     message.TimeoutSeconds,
 					"last_error":          lastError,
 					"failed_at":           time.Now().UTC().Format(time.RFC3339Nano),
 					"original_message_id": message.ID,
@@ -315,7 +320,8 @@ var promoteRetriesScript = redis.NewScript(`
 			'job_id', job.job_id,
 			'type', job.type,
 			'payload', job.payload,
-			'max_attempts', tostring(job.max_attempts)
+			'max_attempts', tostring(job.max_attempts),
+			'timeout_seconds', tostring(job.timeout_seconds or 30)
 		)
 
 		redis.call('ZREM', KEYS[1], entry)
@@ -351,17 +357,26 @@ func (q *RedisQueue) Close() error {
 func parseStreamMessage(
 	streamMessage redis.XMessage,
 ) (Message, error) {
-	jobID, err := readStringField(streamMessage.Values, "job_id")
+	jobID, err := readStringField(
+		streamMessage.Values,
+		"job_id",
+	)
 	if err != nil {
 		return Message{}, err
 	}
 
-	jobType, err := readStringField(streamMessage.Values, "type")
+	jobType, err := readStringField(
+		streamMessage.Values,
+		"type",
+	)
 	if err != nil {
 		return Message{}, err
 	}
 
-	payload, err := readStringField(streamMessage.Values, "payload")
+	payload, err := readStringField(
+		streamMessage.Values,
+		"payload",
+	)
 	if err != nil {
 		return Message{}, err
 	}
@@ -388,12 +403,40 @@ func parseStreamMessage(
 		)
 	}
 
+	timeoutSeconds := 30
+
+	if _, exists := streamMessage.Values["timeout_seconds"]; exists {
+		timeoutSecondsValue, err := readStringField(
+			streamMessage.Values,
+			"timeout_seconds",
+		)
+		if err != nil {
+			return Message{}, err
+		}
+
+		timeoutSeconds, err = strconv.Atoi(timeoutSecondsValue)
+		if err != nil {
+			return Message{}, fmt.Errorf(
+				"invalid timeout_seconds value: %w",
+				err,
+			)
+		}
+
+		if timeoutSeconds < 1 || timeoutSeconds > 3600 {
+			return Message{}, fmt.Errorf(
+				"invalid timeout_seconds value %d",
+				timeoutSeconds,
+			)
+		}
+	}
+
 	return Message{
-		ID:          streamMessage.ID,
-		JobID:       jobID,
-		Type:        jobType,
-		Payload:     json.RawMessage(payload),
-		MaxAttempts: maxAttempts,
+		ID:             streamMessage.ID,
+		JobID:          jobID,
+		Type:           jobType,
+		Payload:        json.RawMessage(payload),
+		MaxAttempts:    maxAttempts,
+		TimeoutSeconds: timeoutSeconds,
 	}, nil
 }
 

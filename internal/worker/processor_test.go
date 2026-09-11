@@ -161,6 +161,19 @@ type fakeExecutor struct {
 	err    error
 }
 
+type contextBlockingExecutor struct{}
+
+func (e *contextBlockingExecutor) Execute(
+	ctx context.Context,
+	_ string,
+	_ string,
+	_ json.RawMessage,
+	_ int,
+) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func (f *fakeExecutor) Execute(
 	_ context.Context,
 	_ string,
@@ -538,5 +551,90 @@ func TestProcessorSkipsJobWhenAtomicClaimFails(t *testing.T) {
 
 	if len(messageQueue.acknowledged) != 1 {
 		t.Error("duplicate message should be acknowledged")
+	}
+}
+
+func TestProcessorTimesOutExecution(t *testing.T) {
+	repository := &fakeRepository{
+		storedJob: job.Job{
+			ID:             "job-timeout",
+			Type:           "slow_task",
+			Payload:        json.RawMessage(`{"duration_ms":10000}`),
+			Status:         job.StatusQueued,
+			Attempts:       0,
+			MaxAttempts:    1,
+			TimeoutSeconds: 30,
+		},
+	}
+
+	messageQueue := &fakeQueue{}
+	jobExecutor := &contextBlockingExecutor{}
+
+	processor := NewProcessor(
+		repository,
+		messageQueue,
+		jobExecutor,
+	)
+
+	processor.timeoutFor = func(job.Job) time.Duration {
+		return 10 * time.Millisecond
+	}
+
+	err := processor.Process(
+		context.Background(),
+		queue.Message{
+			ID:             "message-timeout",
+			JobID:          "job-timeout",
+			Type:           "slow_task",
+			Payload:        json.RawMessage(`{"duration_ms":10000}`),
+			MaxAttempts:    1,
+			TimeoutSeconds: 30,
+		},
+	)
+
+	if err == nil {
+		t.Fatal("expected timed-out execution to return an error")
+	}
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf(
+			"expected context deadline exceeded, got %v",
+			err,
+		)
+	}
+
+	if len(repository.updates) != 2 {
+		t.Fatalf(
+			"expected running and failed updates, got %d",
+			len(repository.updates),
+		)
+	}
+
+	if repository.updates[0].status != job.StatusRunning {
+		t.Errorf(
+			"expected first status to be running, got %s",
+			repository.updates[0].status,
+		)
+	}
+
+	if repository.updates[1].status != job.StatusFailed {
+		t.Errorf(
+			"expected final status to be failed, got %s",
+			repository.updates[1].status,
+		)
+	}
+
+	if len(messageQueue.deadLettered) != 1 {
+		t.Fatalf(
+			"expected one dead-letter record, got %d",
+			len(messageQueue.deadLettered),
+		)
+	}
+
+	if messageQueue.deadLettered[0].attempts != 1 {
+		t.Errorf(
+			"expected one recorded attempt, got %d",
+			messageQueue.deadLettered[0].attempts,
+		)
 	}
 }
